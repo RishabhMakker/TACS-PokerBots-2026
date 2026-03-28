@@ -95,7 +95,7 @@ class Runner():
                 elif code == 'P':
                     active = int(float(clause[1:]))
                 elif code == 'H':
-                    hands = [[], []]
+                    hands = [['??', '??'], ['??', '??']]
                     hands[active] = clause[1:].split(',')
                     pips = [SMALL_BLIND, BIG_BLIND]
                     stacks = [STARTING_STACK - SMALL_BLIND, STARTING_STACK - BIG_BLIND]

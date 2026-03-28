@@ -19,6 +19,13 @@ class Player(Bot):
 
     def __init__(self):
         self.last_round_num = 0
+        self.bankroll = 0
+        self.game_clock = 0.0
+        self.round_num = 0
+        self.is_button = False
+        self.my_cards = []
+        self.opp_cards = []
+        self.my_delta = 0
 
     def _card_rank_value(self, card):
         if not card or len(card) < 1 or card == '??':
@@ -48,30 +55,47 @@ class Player(Bot):
         Called when a new round starts. Called NUM_ROUNDS times.
         '''
         self.last_round_num = game_state.round_num
+        self.round_num = game_state.round_num
+        self.bankroll = game_state.bankroll
+        self.game_clock = game_state.game_clock
+        self.is_button = (active == 0)
+        self.my_cards = list(round_state.hands[active])
 
     def handle_round_over(self, game_state, terminal_state, active):
         '''
         Called when a round ends. Called NUM_ROUNDS times.
         '''
-        _ = game_state
-        _ = terminal_state
-        _ = active
+        self.bankroll = game_state.bankroll
+        self.game_clock = game_state.game_clock
+        self.my_delta = terminal_state.deltas[active]
+        self.opp_cards = list(terminal_state.previous_state.hands[1 - active])
 
     def get_action(self, game_state, round_state, active):
         '''
         Where the magic happens - your code should implement this function.
         Called any time the engine needs an action from your bot.
         '''
-        _ = game_state
-        legal_actions = round_state.legal_actions()
+        # ---- State extraction (from all 3 parameters) ----
+        game_clock = game_state.game_clock
+        bankroll = game_state.bankroll
+        round_num = game_state.round_num
 
+        legal_actions = round_state.legal_actions()
+        my_cards = round_state.hands[active]
+        board = round_state.board
+        street = round_state.street
         my_pip = round_state.pips[active]
         opp_pip = round_state.pips[1 - active]
-        continue_cost = opp_pip - my_pip
         my_stack = round_state.stacks[active]
-        _ = STARTING_STACK - my_stack
+        opp_stack = round_state.stacks[1 - active]
+        continue_cost = opp_pip - my_pip
+        pot = (STARTING_STACK - my_stack) + (STARTING_STACK - opp_stack)
+        pot_odds = continue_cost / (pot + continue_cost) if continue_cost > 0 else 0
+        min_raise, max_raise = round_state.raise_bounds() if RaiseAction in legal_actions else (0, 0)
+        can_redraw = RedrawAction in legal_actions
+        redraws_used = round_state.redraws_used
 
-        # Demonstrate redraw usage on flop/turn with weak holdings.
+        # ---- Decision (TODO: replace with equity-based strategy) ----
         if RedrawAction in legal_actions and self._should_redraw(round_state, active):
             target_index = self._weakest_hole_index(round_state.hands[active])
             if CheckAction in legal_actions:
@@ -79,11 +103,9 @@ class Player(Bot):
             if CallAction in legal_actions:
                 return RedrawAction('hole', target_index, CallAction())
             if RaiseAction in legal_actions:
-                min_raise, _ = round_state.raise_bounds()
                 return RedrawAction('hole', target_index, RaiseAction(min_raise))
 
         if RaiseAction in legal_actions and continue_cost == 0 and random.random() < 0.3:
-            min_raise, _ = round_state.raise_bounds()
             return RaiseAction(min_raise)
         if CheckAction in legal_actions:
             return CheckAction()
