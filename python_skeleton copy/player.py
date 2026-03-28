@@ -1,21 +1,34 @@
 '''
-Equity-based pokerbot.
+Exploitative equity bot: better equity estimation, range-adjusted decisions,
+tighter pot-odds discipline, improved redraws, and consistent bet sizing.
 '''
 from skeleton.actions import FoldAction, CallAction, CheckAction, RaiseAction, RedrawAction
 from skeleton.states import NUM_ROUNDS, STARTING_STACK, BIG_BLIND
 from skeleton.bot import Bot
 from skeleton.runner import parse_args, run_bot
-from equity import preflop_strength, monte_carlo_equity, redraw_equity
+from equity import monte_carlo_equity, best_redraw_equity
 
 RANKS = '23456789TJQKA'
 
-# Adaptive sim count: more sims when fewer unknowns (more accurate),
-# fewer sims preflop (handled by Chen table anyway).
-SIMS_BY_STREET = {0: 0, 3: 400, 4: 300, 5: 200}
+# Use MC for ALL streets including preflop.
+SIMS_BY_STREET = {0: 200, 3: 500, 4: 400, 5: 300}
 
-# Time threshold (seconds) below which we cut sim count to survive.
 LOW_TIME_THRESHOLD = 15.0
-LOW_TIME_SIMS = 100
+LOW_TIME_SIMS = 80
+
+# Redraw threshold: take any improvement >= 2% (redraws are free).
+REDRAW_THRESHOLD = 0.02
+
+# Pot-odds safety margin: only 5% buffer instead of the typical 10%.
+POT_ODDS_MARGIN = 0.05
+
+# Consistent raise sizing: always bet ~60% pot to avoid leaking hand strength.
+RAISE_POT_FRACTION = 0.60
+
+# Equity discount: scale down our equity when facing opponent aggression.
+# A bet of X% of pot → multiply equity by (1 - DISCOUNT_RATE * X).
+DISCOUNT_RATE = 0.22
+DISCOUNT_FLOOR = 0.60
 
 
 class Player(Bot):
@@ -61,29 +74,30 @@ class Player(Bot):
     # Equity helpers
     # ------------------------------------------------------------------
 
-    def _get_equity(self, my_cards, board, street, game_clock, force_mc=False):
-        '''Return equity, using cache if the street hasn't changed.'''
-        if street == self._cached_street and not force_mc:
+    def _get_equity(self, my_cards, board, street, game_clock):
+        '''Return MC equity for any street, using cache when possible.'''
+        if street == self._cached_street:
             return self._cached_equity
 
-        if street == 0 and not force_mc:
-            valid = [c for c in my_cards if c and c != '??']
-            if len(valid) == 2:
-                equity = preflop_strength(valid[0], valid[1])
-            else:
-                equity = 0.5
-        else:
-            sims = SIMS_BY_STREET.get(street, 300)
-            if force_mc and street == 0:
-                sims = 200
-            if game_clock < LOW_TIME_THRESHOLD:
-                sims = LOW_TIME_SIMS
-            equity = monte_carlo_equity(my_cards, board, num_simulations=sims,
-                                        dead_cards=self.dead_cards or None)
+        sims = SIMS_BY_STREET.get(street, 300)
+        if game_clock < LOW_TIME_THRESHOLD:
+            sims = LOW_TIME_SIMS
+        equity = monte_carlo_equity(my_cards, board, num_simulations=sims,
+                                    dead_cards=self.dead_cards or None)
 
         self._cached_street = street
         self._cached_equity = equity
         return equity
+
+    def _discount_equity(self, equity, continue_cost, pot):
+        '''Reduce our equity estimate when the opponent bets.
+        Bigger bets → opponent likely has a stronger hand → our equity is lower
+        than the raw MC estimate against a random hand.'''
+        if continue_cost <= 0 or pot <= 0:
+            return equity
+        bet_fraction = min(continue_cost / pot, 1.5)
+        multiplier = max(DISCOUNT_FLOOR, 1.0 - DISCOUNT_RATE * bet_fraction)
+        return equity * multiplier
 
     # ------------------------------------------------------------------
     # Dead card tracking
@@ -104,48 +118,33 @@ class Player(Bot):
         self._prev_board = list(round_state.board)
 
     # ------------------------------------------------------------------
-    # Redraw logic
+    # Redraw logic (tests BOTH hole cards via MC)
     # ------------------------------------------------------------------
 
-    def _rank_value(self, card):
-        if not card or card == '??':
-            return -1
-        try:
-            return RANKS.index(card[0])
-        except ValueError:
-            return -1
-
-    def _weakest_hole_index(self, my_cards):
-        v0 = self._rank_value(my_cards[0])
-        v1 = self._rank_value(my_cards[1])
-        return 0 if v0 <= v1 else 1
-
-    REDRAW_IMPROVEMENT_THRESHOLD = 0.05
-
     def _should_redraw(self, round_state, active, my_cards, board, game_clock):
-        '''Use single-pass MC to decide if redrawing the weak hole card helps.'''
+        '''MC-test redrawing each hole card; pick whichever helps more.
+        Returns (should_redraw, current_equity, best_index).'''
         if round_state.redraws_used[active]:
-            return False, 0.0
+            return False, 0.5, 0
         if round_state.street not in (3, 4):
-            return False, 0.0
+            return False, 0.5, 0
 
-        weak_idx = self._weakest_hole_index(my_cards)
         sims = SIMS_BY_STREET.get(round_state.street, 300)
         if game_clock < LOW_TIME_THRESHOLD:
             sims = LOW_TIME_SIMS
 
-        cur_eq, rdr_eq = redraw_equity(my_cards, board, weak_idx,
-                                        num_simulations=sims,
-                                        dead_cards=self.dead_cards or None)
-        improvement = rdr_eq - cur_eq
-        return improvement >= self.REDRAW_IMPROVEMENT_THRESHOLD, cur_eq
+        cur_eq, best_rdr_eq, best_idx = best_redraw_equity(
+            my_cards, board, num_simulations=sims,
+            dead_cards=self.dead_cards or None)
+
+        improvement = best_rdr_eq - cur_eq
+        return improvement >= REDRAW_THRESHOLD, cur_eq, best_idx
 
     # ------------------------------------------------------------------
     # Main decision
     # ------------------------------------------------------------------
 
     def _safe_action(self, legal_actions):
-        '''Fallback action that never crashes.'''
         if CheckAction in legal_actions:
             return CheckAction()
         return FoldAction()
@@ -167,71 +166,66 @@ class Player(Bot):
         opp_stack = round_state.stacks[1 - active]
         continue_cost = opp_pip - my_pip
         pot = (STARTING_STACK - my_stack) + (STARTING_STACK - opp_stack)
-        pot_odds = continue_cost / (pot + continue_cost) if continue_cost > 0 else 0
         min_raise, max_raise = round_state.raise_bounds() if RaiseAction in legal_actions else (0, 0)
 
-        # ---- Detect opponent board redraws and track dead cards ----
         self._detect_opponent_board_redraw(round_state, active)
 
-        # ---- Redraw check: compare current equity vs redraw equity ----
+        # --- Redraw check: MC both cards, pick the best swap ---
         if RedrawAction in legal_actions and street in (3, 4):
-            should_redraw, equity = self._should_redraw(
+            should_redraw, equity, best_idx = self._should_redraw(
                 round_state, active, my_cards, board, game_state.game_clock)
             self._cached_street = street
             self._cached_equity = equity
             if should_redraw:
-                target_index = self._weakest_hole_index(my_cards)
-                inner = self._betting_action(equity, pot_odds, continue_cost,
-                                             my_stack, min_raise, max_raise, legal_actions)
-                return RedrawAction('hole', target_index, inner)
+                inner = self._betting_action(equity, continue_cost,
+                                             my_stack, min_raise, max_raise,
+                                             pot, legal_actions)
+                return RedrawAction('hole', best_idx, inner)
         else:
-            is_all_in = continue_cost >= my_stack
-            force_mc = is_all_in and street == 0
-            equity = self._get_equity(my_cards, board, street, game_state.game_clock,
-                                      force_mc=force_mc)
+            equity = self._get_equity(my_cards, board, street, game_state.game_clock)
 
-        return self._betting_action(equity, pot_odds, continue_cost,
-                                    my_stack, min_raise, max_raise, legal_actions)
+        return self._betting_action(equity, continue_cost,
+                                    my_stack, min_raise, max_raise,
+                                    pot, legal_actions)
 
-    def _betting_action(self, equity, pot_odds, continue_cost,
-                        my_stack, min_raise, max_raise, legal_actions):
-        '''Pure equity-vs-pot-odds decision.'''
+    def _betting_action(self, raw_equity, continue_cost,
+                        my_stack, min_raise, max_raise, pot, legal_actions):
+        '''Equity-vs-pot-odds with range adjustment and consistent sizing.'''
 
         is_all_in = continue_cost >= my_stack
 
-        # --- All-in defense: require strong equity to call a shove ---
+        # Apply equity discount based on opponent's bet size.
+        equity = self._discount_equity(raw_equity, continue_cost, pot)
+
+        pot_odds = continue_cost / (pot + continue_cost) if continue_cost > 0 else 0
+
+        # --- All-in defense: tighter than the original (0.58 vs 0.55) ---
         if is_all_in:
-            if equity >= 0.55:
+            if equity >= 0.58:
                 return CallAction() if CallAction in legal_actions else CheckAction()
             if CheckAction in legal_actions:
                 return CheckAction()
             return FoldAction()
 
-        # --- Very strong hand: raise aggressively ---
-        if equity >= 0.75 and RaiseAction in legal_actions:
-            raise_amount = int(min_raise + 0.7 * (max_raise - min_raise))
-            return RaiseAction(max(min_raise, min(raise_amount, max_raise)))
-
-        # --- Strong hand: raise moderately ---
+        # --- Strong hand (equity >= 0.6): raise with consistent sizing ---
         if equity >= 0.6 and RaiseAction in legal_actions:
-            raise_amount = int(min_raise + 0.35 * (max_raise - min_raise))
-            return RaiseAction(max(min_raise, min(raise_amount, max_raise)))
+            raise_amount = max(min_raise, int(pot * RAISE_POT_FRACTION))
+            raise_amount = max(min_raise, min(raise_amount, max_raise))
+            return RaiseAction(raise_amount)
 
-        # --- Decent hand: comfortably above pot odds, call ---
-        if equity >= pot_odds + 0.1:
-            if continue_cost == 0 and equity >= 0.5 and RaiseAction in legal_actions:
-                return RaiseAction(min_raise)
+        # --- Above pot odds + margin: call (no min-bet tells) ---
+        if equity >= pot_odds + POT_ODDS_MARGIN:
             if CheckAction in legal_actions:
                 return CheckAction()
             return CallAction()
 
-        # --- Marginal: barely above pot odds, call ---
+        # --- Marginally above pot odds: still +EV to call ---
         if equity >= pot_odds:
             if CheckAction in legal_actions:
                 return CheckAction()
             return CallAction()
 
-        # --- Below pot odds: fold (or check if free) ---
+        # --- Below pot odds: fold or check ---
         if CheckAction in legal_actions:
             return CheckAction()
         return FoldAction()
