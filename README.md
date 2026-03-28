@@ -34,7 +34,7 @@ This year’s game is based on no-limit Texas Hold'em, with one major twist: **r
 
 That is, the competition rules are the standard Texas Hold'em rules with the option to redraw one card per hand. 
 
-Your poker bot will have a total time limit of 180 seconds per **match**. Each match will consist of 300 hands. At the start of each hand you will have 400 chips. These chips do not persist between hands, i.e. at the start of every hand you will always have 400 chips regardless of what happened in previous rounds. You chip wins/losses in each round will then be summed at the end of the 300 hands to determine the winner. The small/big blinds are 1 and 2, respectively. 
+Your poker bot will have a total time limit of 180 seconds per **match**. Each match will consist of 1000 hands. At the start of each hand you will have 400 chips. These chips do not persist between hands, i.e. at the start of every hand you will always have 250 chips regardless of what happened in previous rounds. You chip wins/losses in each round will then be summed at the end of the 1000 hands to determine the winner. The small/big blinds are 2 and 5, respectively. 
 
 ## Repository Layout
 
