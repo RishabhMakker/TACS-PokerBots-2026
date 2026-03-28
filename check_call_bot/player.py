@@ -36,8 +36,11 @@ class Player(Bot):
         my_pip = round_state.pips[active]
         opp_pip = round_state.pips[1 - active]
         continue_cost = opp_pip - my_pip
+        my_cards = round_state.hands[active]
         weakest_idx = 0
-        if self._rank_value(round_state.hands[active][1]) < self._rank_value(round_state.hands[active][0]):
+        if len(my_cards) >= 2 and self._rank_value(my_cards[1]) < self._rank_value(
+            my_cards[0]
+        ):
             weakest_idx = 1
 
         # If redraw is available and we're post-flop with weak hole cards, redraw and continue passively.

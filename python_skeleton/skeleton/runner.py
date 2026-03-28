@@ -89,6 +89,8 @@ class Runner():
         round_flag = True
         for packet in self.receive():
             for clause in packet:
+                if not clause:
+                    continue
                 code = clause[0]
                 if code == 'T':
                     game_state = GameState(game_state.bankroll, float(clause[1:]), game_state.round_num)
@@ -123,9 +125,21 @@ class Runner():
                     round_state = self._apply_action_clause(round_state, clause)
                 elif code == 'B':
                     board_cards = clause[1:].split(',') if len(clause) > 1 else []
+                    # Keep street aligned with the board: engine may append K before B in a
+                    # packet, so proceed_street can run while street still reflects the prior
+                    # street until this clause arrives.
+                    n_board = len(board_cards)
+                    inferred = round_state.street
+                    if n_board == 3:
+                        inferred = max(inferred, 3)
+                    elif n_board == 4:
+                        inferred = max(inferred, 4)
+                    elif n_board >= 5:
+                        inferred = 5
+                    new_street = inferred
                     round_state = RoundState(
                         round_state.button,
-                        round_state.street,
+                        new_street,
                         round_state.pips,
                         round_state.stacks,
                         round_state.hands,

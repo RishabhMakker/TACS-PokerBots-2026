@@ -1,16 +1,29 @@
 '''
 Encapsulates game and round state information for the player.
 '''
+import os
+import sys
 from collections import namedtuple
 from .actions import FoldAction, CallAction, CheckAction, RaiseAction, RedrawAction
 
 GameState = namedtuple('GameState', ['bankroll', 'game_clock', 'round_num'])
 TerminalState = namedtuple('TerminalState', ['deltas', 'previous_state'])
 
-NUM_ROUNDS = 1000
-STARTING_STACK = 400
-BIG_BLIND = 2
-SMALL_BLIND = 1
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+try:
+    import config as _engine_config
+
+    NUM_ROUNDS = _engine_config.NUM_ROUNDS
+    STARTING_STACK = _engine_config.STARTING_STACK
+    BIG_BLIND = _engine_config.BIG_BLIND
+    SMALL_BLIND = _engine_config.SMALL_BLIND
+except ImportError:
+    NUM_ROUNDS = 1000
+    STARTING_STACK = 400
+    BIG_BLIND = 2
+    SMALL_BLIND = 1
 
 
 class RoundState(
@@ -198,10 +211,21 @@ class RoundState(
                 redraws_used = list(self.redraws_used)
                 # Engine does not transmit the new redraw card directly in action history.
                 # Use a placeholder to preserve shape/indices in local bot state.
+                # Opponent holes are unknown ([] in runner until O at showdown); pad so
+                # replaying their W…K action does not index past the list end.
                 if target_type == 'hole':
-                    hands[active][target_index] = '??'
+                    slot = list(hands[active])
+                    need = max(2, target_index + 1)
+                    while len(slot) < need:
+                        slot.append('??')
+                    slot[target_index] = '??'
+                    hands[active] = slot
                 else:
-                    board[target_index] = '??'
+                    b = list(board)
+                    while len(b) <= target_index:
+                        b.append('??')
+                    b[target_index] = '??'
+                    board = b
                 redraws_used[active] = True
                 state_after_redraw = RoundState(
                     self.button,
