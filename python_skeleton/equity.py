@@ -156,11 +156,12 @@ def monte_carlo_equity(my_hand_strs, board_strs, num_simulations=400, dead_cards
 
     wins = 0
     ties = 0
+    draw_count = 2 + cards_needed
 
     for _ in range(num_simulations):
-        random.shuffle(deck)
-        opp_hand = deck[:2]
-        sim_board = board + deck[2:2 + cards_needed]
+        sample = random.sample(deck, draw_count)
+        opp_hand = sample[:2]
+        sim_board = board + sample[2:]
 
         my_score = pkrbot.evaluate(my_hand + sim_board)
         opp_score = pkrbot.evaluate(opp_hand + sim_board)
@@ -190,12 +191,13 @@ def redraw_equity(my_hand_strs, board_strs, weak_index, num_simulations=400,
     ties_current = 0
     wins_redraw = 0
     ties_redraw = 0
+    draw_count = 2 + cards_needed + 1
 
     for _ in range(num_simulations):
-        random.shuffle(deck)
-        opp_hand = deck[:2]
-        sim_board = board + deck[2:2 + cards_needed]
-        new_card = deck[2 + cards_needed]
+        sample = random.sample(deck, draw_count)
+        opp_hand = sample[:2]
+        sim_board = board + sample[2:2 + cards_needed]
+        new_card = sample[2 + cards_needed]
 
         opp_score = pkrbot.evaluate(opp_hand + sim_board)
 
@@ -217,3 +219,53 @@ def redraw_equity(my_hand_strs, board_strs, weak_index, num_simulations=400,
     cur_eq = (wins_current + 0.5 * ties_current) / num_simulations
     rdr_eq = (wins_redraw + 0.5 * ties_redraw) / num_simulations
     return cur_eq, rdr_eq
+
+
+def best_redraw_equity(my_hand_strs, board_strs, num_simulations=400,
+                       dead_cards=None):
+    '''
+    Test redrawing EACH hole card in a single MC pass.
+    Returns (current_equity, best_redraw_equity, best_redraw_index).
+    '''
+    my_hand, board, deck, cards_needed = _build_deck_and_board(
+        my_hand_strs, board_strs, dead_cards)
+
+    wins_cur = ties_cur = 0
+    wins_r0 = ties_r0 = 0
+    wins_r1 = ties_r1 = 0
+    draw_count = 2 + cards_needed + 2
+
+    for _ in range(num_simulations):
+        sample = random.sample(deck, draw_count)
+        opp_hand = sample[:2]
+        sim_board = board + sample[2:2 + cards_needed]
+        new_card_a = sample[2 + cards_needed]
+        new_card_b = sample[2 + cards_needed + 1]
+
+        opp_score = pkrbot.evaluate(opp_hand + sim_board)
+
+        my_score = pkrbot.evaluate(my_hand + sim_board)
+        if my_score > opp_score:
+            wins_cur += 1
+        elif my_score == opp_score:
+            ties_cur += 1
+
+        score_r0 = pkrbot.evaluate([new_card_a, my_hand[1]] + sim_board)
+        if score_r0 > opp_score:
+            wins_r0 += 1
+        elif score_r0 == opp_score:
+            ties_r0 += 1
+
+        score_r1 = pkrbot.evaluate([my_hand[0], new_card_b] + sim_board)
+        if score_r1 > opp_score:
+            wins_r1 += 1
+        elif score_r1 == opp_score:
+            ties_r1 += 1
+
+    cur_eq = (wins_cur + 0.5 * ties_cur) / num_simulations
+    eq_r0 = (wins_r0 + 0.5 * ties_r0) / num_simulations
+    eq_r1 = (wins_r1 + 0.5 * ties_r1) / num_simulations
+
+    if eq_r0 >= eq_r1:
+        return cur_eq, eq_r0, 0
+    return cur_eq, eq_r1, 1
