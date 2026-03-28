@@ -121,15 +121,8 @@ def preflop_strength(card1_str, card2_str):
 # Monte Carlo equity estimation (post-flop)
 # ---------------------------------------------------------------------------
 
-def monte_carlo_equity(my_hand_strs, board_strs, num_simulations=400, dead_cards=None):
-    '''
-    Estimate equity (0.0–1.0) via Monte Carlo rollout.
-
-    my_hand_strs : list of 2 card strings, e.g. ['As', 'Kh']
-    board_strs   : list of 0-5 card strings (current board, may contain '??')
-    dead_cards   : list of card strings known to be out of play (e.g. opponent redraw reveals)
-    num_simulations : number of random rollouts
-    '''
+def _build_deck_and_board(my_hand_strs, board_strs, dead_cards=None):
+    '''Shared setup for MC functions: build Card lists and remaining deck.'''
     my_hand = [pkrbot.Card(s) for s in my_hand_strs if s != '??']
     board = [pkrbot.Card(s) for s in board_strs if s != '??']
 
@@ -146,6 +139,20 @@ def monte_carlo_equity(my_hand_strs, board_strs, num_simulations=400, dead_cards
 
     deck = [c for c in ALL_CARDS if str(c) not in known_strs]
     cards_needed = 5 - len(board)
+    return my_hand, board, deck, cards_needed
+
+
+def monte_carlo_equity(my_hand_strs, board_strs, num_simulations=400, dead_cards=None):
+    '''
+    Estimate equity (0.0–1.0) via Monte Carlo rollout.
+
+    my_hand_strs : list of 2 card strings, e.g. ['As', 'Kh']
+    board_strs   : list of 0-5 card strings (current board, may contain '??')
+    dead_cards   : list of card strings known to be out of play
+    num_simulations : number of random rollouts
+    '''
+    my_hand, board, deck, cards_needed = _build_deck_and_board(
+        my_hand_strs, board_strs, dead_cards)
 
     wins = 0
     ties = 0
@@ -164,3 +171,49 @@ def monte_carlo_equity(my_hand_strs, board_strs, num_simulations=400, dead_cards
             ties += 1
 
     return (wins + 0.5 * ties) / num_simulations
+
+
+def redraw_equity(my_hand_strs, board_strs, weak_index, num_simulations=400,
+                  dead_cards=None):
+    '''
+    Single-pass comparison: current equity vs equity after redrawing one hole card.
+
+    Returns (current_equity, redraw_equity) both in 0.0–1.0.
+    weak_index: which hole card to replace (0 or 1).
+    '''
+    my_hand, board, deck, cards_needed = _build_deck_and_board(
+        my_hand_strs, board_strs, dead_cards)
+
+    keep_index = 1 - weak_index
+
+    wins_current = 0
+    ties_current = 0
+    wins_redraw = 0
+    ties_redraw = 0
+
+    for _ in range(num_simulations):
+        random.shuffle(deck)
+        opp_hand = deck[:2]
+        sim_board = board + deck[2:2 + cards_needed]
+        new_card = deck[2 + cards_needed]
+
+        opp_score = pkrbot.evaluate(opp_hand + sim_board)
+
+        my_score = pkrbot.evaluate(my_hand + sim_board)
+        if my_score > opp_score:
+            wins_current += 1
+        elif my_score == opp_score:
+            ties_current += 1
+
+        redraw_hand = [None, None]
+        redraw_hand[keep_index] = my_hand[keep_index]
+        redraw_hand[weak_index] = new_card
+        redraw_score = pkrbot.evaluate(redraw_hand + sim_board)
+        if redraw_score > opp_score:
+            wins_redraw += 1
+        elif redraw_score == opp_score:
+            ties_redraw += 1
+
+    cur_eq = (wins_current + 0.5 * ties_current) / num_simulations
+    rdr_eq = (wins_redraw + 0.5 * ties_redraw) / num_simulations
+    return cur_eq, rdr_eq

@@ -5,7 +5,7 @@ from skeleton.actions import FoldAction, CallAction, CheckAction, RaiseAction, R
 from skeleton.states import NUM_ROUNDS, STARTING_STACK, BIG_BLIND
 from skeleton.bot import Bot
 from skeleton.runner import parse_args, run_bot
-from equity import preflop_strength, monte_carlo_equity
+from equity import preflop_strength, monte_carlo_equity, redraw_equity
 
 RANKS = '23456789TJQKA'
 
@@ -35,6 +35,8 @@ class Player(Bot):
         self.dead_cards = []
         self._cached_street = -1
         self._cached_equity = 0.5
+        self._prev_board = []
+        self._prev_opp_redraws_used = False
 
     def handle_new_round(self, game_state, round_state, active):
         self.last_round_num = game_state.round_num
@@ -46,6 +48,8 @@ class Player(Bot):
         self.dead_cards = []
         self._cached_street = -1
         self._cached_equity = 0.5
+        self._prev_board = list(round_state.board)
+        self._prev_opp_redraws_used = False
 
     def handle_round_over(self, game_state, terminal_state, active):
         self.bankroll = game_state.bankroll
@@ -82,6 +86,24 @@ class Player(Bot):
         return equity
 
     # ------------------------------------------------------------------
+    # Dead card tracking
+    # ------------------------------------------------------------------
+
+    def _detect_opponent_board_redraw(self, round_state, active):
+        '''Check if opponent redrew a board card; if so, add the old card to dead_cards.'''
+        opp = 1 - active
+        opp_used_now = round_state.redraws_used[opp]
+        if opp_used_now and not self._prev_opp_redraws_used:
+            for i, old_card in enumerate(self._prev_board):
+                if old_card and old_card != '??' and i < len(round_state.board):
+                    new_card = round_state.board[i]
+                    if new_card == '??' or new_card != old_card:
+                        if old_card not in self.dead_cards:
+                            self.dead_cards.append(old_card)
+        self._prev_opp_redraws_used = opp_used_now
+        self._prev_board = list(round_state.board)
+
+    # ------------------------------------------------------------------
     # Redraw logic
     # ------------------------------------------------------------------
 
@@ -98,12 +120,25 @@ class Player(Bot):
         v1 = self._rank_value(my_cards[1])
         return 0 if v0 <= v1 else 1
 
-    def _should_redraw(self, round_state, active, equity):
+    REDRAW_IMPROVEMENT_THRESHOLD = 0.05
+
+    def _should_redraw(self, round_state, active, my_cards, board, game_clock):
+        '''Use single-pass MC to decide if redrawing the weak hole card helps.'''
         if round_state.redraws_used[active]:
-            return False
+            return False, 0.0
         if round_state.street not in (3, 4):
-            return False
-        return equity < 0.35
+            return False, 0.0
+
+        weak_idx = self._weakest_hole_index(my_cards)
+        sims = SIMS_BY_STREET.get(round_state.street, 300)
+        if game_clock < LOW_TIME_THRESHOLD:
+            sims = LOW_TIME_SIMS
+
+        cur_eq, rdr_eq = redraw_equity(my_cards, board, weak_idx,
+                                        num_simulations=sims,
+                                        dead_cards=self.dead_cards or None)
+        improvement = rdr_eq - cur_eq
+        return improvement >= self.REDRAW_IMPROVEMENT_THRESHOLD, cur_eq
 
     # ------------------------------------------------------------------
     # Main decision
@@ -135,17 +170,25 @@ class Player(Bot):
         pot_odds = continue_cost / (pot + continue_cost) if continue_cost > 0 else 0
         min_raise, max_raise = round_state.raise_bounds() if RaiseAction in legal_actions else (0, 0)
 
-        is_all_in = continue_cost >= my_stack
-        force_mc = is_all_in and street == 0
-        equity = self._get_equity(my_cards, board, street, game_state.game_clock,
-                                  force_mc=force_mc)
+        # ---- Detect opponent board redraws and track dead cards ----
+        self._detect_opponent_board_redraw(round_state, active)
 
-        # ---- Redraw check (flop / turn only, when equity is low) ----
-        if RedrawAction in legal_actions and self._should_redraw(round_state, active, equity):
-            target_index = self._weakest_hole_index(my_cards)
-            inner = self._betting_action(equity, pot_odds, continue_cost,
-                                         my_stack, min_raise, max_raise, legal_actions)
-            return RedrawAction('hole', target_index, inner)
+        # ---- Redraw check: compare current equity vs redraw equity ----
+        if RedrawAction in legal_actions and street in (3, 4):
+            should_redraw, equity = self._should_redraw(
+                round_state, active, my_cards, board, game_state.game_clock)
+            self._cached_street = street
+            self._cached_equity = equity
+            if should_redraw:
+                target_index = self._weakest_hole_index(my_cards)
+                inner = self._betting_action(equity, pot_odds, continue_cost,
+                                             my_stack, min_raise, max_raise, legal_actions)
+                return RedrawAction('hole', target_index, inner)
+        else:
+            is_all_in = continue_cost >= my_stack
+            force_mc = is_all_in and street == 0
+            equity = self._get_equity(my_cards, board, street, game_state.game_clock,
+                                      force_mc=force_mc)
 
         return self._betting_action(equity, pot_odds, continue_cost,
                                     my_stack, min_raise, max_raise, legal_actions)
